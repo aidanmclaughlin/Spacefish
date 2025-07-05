@@ -28,6 +28,8 @@
 #include <sstream>
 #include <tuple>
 
+#include "bitboard.h"
+#include "movegen.h"
 #include "nnue/network.h"
 #include "nnue/nnue_misc.h"
 #include "position.h"
@@ -48,6 +50,49 @@ int Eval::simple_eval(const Position& pos) {
 
 bool Eval::use_smallnet(const Position& pos) { return std::abs(simple_eval(pos)) > 962; }
 
+namespace {
+
+int mobility(const Position& p, Color c)
+{
+    Bitboard occ      = p.pieces();
+    Bitboard friendly = p.pieces(c);
+    Bitboard pawns    = p.pieces(c, PAWN);
+    int      count    = 0;
+
+    Bitboard single = (c == WHITE ? shift<NORTH>(pawns) : shift<SOUTH>(pawns)) & ~occ;
+    count += popcount(single);
+
+    Bitboard dblRank = c == WHITE ? Rank3BB : Rank6BB;
+    count += popcount((c == WHITE ? shift<NORTH>(single & dblRank) : shift<SOUTH>(single & dblRank)) & ~occ);
+
+    Bitboard pawnAtt = (c == WHITE ? shift<NORTH_EAST>(pawns) | shift<NORTH_WEST>(pawns)
+                                   : shift<SOUTH_EAST>(pawns) | shift<SOUTH_WEST>(pawns));
+    count += popcount(pawnAtt & ~friendly);
+
+    Bitboard pieces = p.pieces(c, KNIGHT);
+    while (pieces)
+        count += popcount(attacks_bb<KNIGHT>(pop_lsb(pieces)) & ~friendly);
+
+    pieces = p.pieces(c, BISHOP);
+    while (pieces)
+        count += popcount(attacks_bb<BISHOP>(pop_lsb(pieces), occ) & ~friendly);
+
+    pieces = p.pieces(c, ROOK);
+    while (pieces)
+        count += popcount(attacks_bb<ROOK>(pop_lsb(pieces), occ) & ~friendly);
+
+    pieces = p.pieces(c, QUEEN);
+    while (pieces)
+        count += popcount(attacks_bb<QUEEN>(pop_lsb(pieces), occ) & ~friendly);
+
+    Square k = p.square<KING>(c);
+    count += popcount(attacks_bb<KING>(k) & ~friendly);
+
+    return count;
+}
+
+} // namespace
+
 // Evaluate is the evaluator for the outer world. It returns a static evaluation
 // of the position from the point of view of the side to move.
 Value Eval::evaluate(const Eval::NNUE::Networks&    networks,
@@ -56,37 +101,18 @@ Value Eval::evaluate(const Eval::NNUE::Networks&    networks,
                      Eval::NNUE::AccumulatorCaches& caches,
                      int                            optimism) {
 
+    (void)networks;
+    (void)accumulators;
+    (void)caches;
+    (void)optimism;
+
     assert(!pos.checkers());
 
-    bool smallNet           = use_smallnet(pos);
-    auto [psqt, positional] = smallNet ? networks.small.evaluate(pos, accumulators, &caches.small)
-                                       : networks.big.evaluate(pos, accumulators, &caches.big);
+    Color us   = pos.side_to_move();
+    int mob_us = mobility(pos, us);
+    int mob_op = mobility(pos, ~us);
 
-    Value nnue = (125 * psqt + 131 * positional) / 128;
-
-    // Re-evaluate the position when higher eval accuracy is worth the time spent
-    if (smallNet && (std::abs(nnue) < 236))
-    {
-        std::tie(psqt, positional) = networks.big.evaluate(pos, accumulators, &caches.big);
-        nnue                       = (125 * psqt + 131 * positional) / 128;
-        smallNet                   = false;
-    }
-
-    // Blend optimism and eval with nnue complexity
-    int nnueComplexity = std::abs(psqt - positional);
-    optimism += optimism * nnueComplexity / 468;
-    nnue -= nnue * nnueComplexity / 18000;
-
-    int material = 535 * pos.count<PAWN>() + pos.non_pawn_material();
-    int v        = (nnue * (77777 + material) + optimism * (7777 + material)) / 77777;
-
-    // Damp down the evaluation linearly when shuffling
-    v -= v * pos.rule50_count() / 212;
-
-    // Guarantee evaluation does not hit the tablebase range
-    v = std::clamp(v, VALUE_TB_LOSS_IN_MAX_PLY + 1, VALUE_TB_WIN_IN_MAX_PLY - 1);
-
-    return v;
+    return Value((mob_us - mob_op) * 10);
 }
 
 // Like evaluate(), but instead of returning a value, it returns
