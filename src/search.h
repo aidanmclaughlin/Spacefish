@@ -35,6 +35,7 @@
 #include "misc.h"
 #include "nnue/network.h"
 #include "nnue/nnue_accumulator.h"
+#include "mobility.h"
 #include "numa.h"
 #include "position.h"
 #include "score.h"
@@ -294,6 +295,7 @@ class Worker {
     CorrectionHistory<Continuation> continuationCorrectionHistory;
 
     TTMoveHistory ttMoveHistory;
+    MobilityHistory mobilityHistory;
 
    private:
     void iterative_deepening();

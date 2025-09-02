@@ -37,6 +37,7 @@
 #include "evaluate.h"
 #include "history.h"
 #include "misc.h"
+#include "mobility.h"
 #include "movegen.h"
 #include "movepick.h"
 #include "nnue/network.h"
@@ -546,6 +547,7 @@ void Search::Worker::clear() {
     nonPawnCorrectionHistory.fill(0);
 
     ttMoveHistory = 0;
+    mobilityHistory.clear();
 
     for (auto& to : continuationCorrectionHistory)
         for (auto& h : to)
@@ -1015,6 +1017,13 @@ moves_loop:  // When in check, search starts here
 
         (ss + 1)->quietMoveStreak = (!capture && !givesCheck) ? (ss->quietMoveStreak + 1) : 0;
 
+        // Mobility-based extension: encourage moves that historically increase mobility
+        if (!rootNode && depth >= 6 && !capture && type_of(movedPiece) != PAWN)
+        {
+            if (mobilityHistory.get(us, move) > 200)
+                extension = 1;
+        }
+
         // Calculate new depth for this move
         newDepth = depth - 1;
 
@@ -1170,6 +1179,16 @@ moves_loop:  // When in check, search starts here
             // over current beta
             else if (cutNode)
                 extension = -2;
+        }
+
+        // Mobility-based reduction adjustments on quiet non-pawn moves
+        if (!capture && type_of(movedPiece) != PAWN && depth >= 4)
+        {
+            int mobDelta = mobility_delta(pos, move);
+            if (mobDelta < -5)
+                r += 512;
+            else if (mobDelta > 5)
+                r -= 256;
         }
 
         // Step 16. Make the move
@@ -1379,6 +1398,9 @@ moves_loop:  // When in check, search starts here
                     // (* Scaler) Especially if they make cutoffCnt increment more often.
                     ss->cutoffCnt += (extension < 2) || PvNode;
                     assert(value >= beta);  // Fail high
+                    // Update mobility history for quiet non-pawn fail-high moves
+                    if (!capture && type_of(movedPiece) != PAWN)
+                        mobilityHistory.update(pos.side_to_move(), move, 400);
                     break;
                 }
 

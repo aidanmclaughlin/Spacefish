@@ -32,6 +32,7 @@
 #include "movegen.h"
 #include "nnue/network.h"
 #include "nnue/nnue_misc.h"
+#include "mobility.h"
 #include "position.h"
 #include "types.h"
 #include "uci.h"
@@ -50,48 +51,8 @@ int Eval::simple_eval(const Position& pos) {
 
 bool Eval::use_smallnet(const Position& pos) { return std::abs(simple_eval(pos)) > 962; }
 
-namespace {
-
-int mobility(const Position& p, Color c)
-{
-    Bitboard occ      = p.pieces();
-    Bitboard friendly = p.pieces(c);
-    Bitboard pawns    = p.pieces(c, PAWN);
-    int      count    = 0;
-
-    Bitboard single = (c == WHITE ? shift<NORTH>(pawns) : shift<SOUTH>(pawns)) & ~occ;
-    count += popcount(single);
-
-    Bitboard dblRank = c == WHITE ? Rank3BB : Rank6BB;
-    count += popcount((c == WHITE ? shift<NORTH>(single & dblRank) : shift<SOUTH>(single & dblRank)) & ~occ);
-
-    Bitboard pawnAtt = (c == WHITE ? shift<NORTH_EAST>(pawns) | shift<NORTH_WEST>(pawns)
-                                   : shift<SOUTH_EAST>(pawns) | shift<SOUTH_WEST>(pawns));
-    count += popcount(pawnAtt & ~friendly);
-
-    Bitboard pieces = p.pieces(c, KNIGHT);
-    while (pieces)
-        count += popcount(attacks_bb<KNIGHT>(pop_lsb(pieces)) & ~friendly);
-
-    pieces = p.pieces(c, BISHOP);
-    while (pieces)
-        count += popcount(attacks_bb<BISHOP>(pop_lsb(pieces), occ) & ~friendly);
-
-    pieces = p.pieces(c, ROOK);
-    while (pieces)
-        count += popcount(attacks_bb<ROOK>(pop_lsb(pieces), occ) & ~friendly);
-
-    pieces = p.pieces(c, QUEEN);
-    while (pieces)
-        count += popcount(attacks_bb<QUEEN>(pop_lsb(pieces), occ) & ~friendly);
-
-    Square k = p.square<KING>(c);
-    count += popcount(attacks_bb<KING>(k) & ~friendly);
-
-    return count;
-}
-
-} // namespace
+// Lightweight global mobility cache (shared across threads)
+static MobilityCache g_mobilityCache;
 
 // Evaluate is the evaluator for the outer world. It returns a static evaluation
 // of the position from the point of view of the side to move.
@@ -108,10 +69,15 @@ Value Eval::evaluate(const Eval::NNUE::Networks&    networks,
 
     assert(!pos.checkers());
 
-    Color us   = pos.side_to_move();
-    int mob_us = mobility(pos, us);
-    int mob_op = mobility(pos, ~us);
+    // Probe cache
+    if (auto* mi = g_mobilityCache.probe(pos.key()))
+        return Value(mi->differential * 10);
 
+    Color us   = pos.side_to_move();
+    int mob_us = fast_mobility(pos, us);
+    int mob_op = fast_mobility(pos, ~us);
+
+    g_mobilityCache.store(pos.key(), MobilityInfo(mob_us, mob_op));
     return Value((mob_us - mob_op) * 10);
 }
 
