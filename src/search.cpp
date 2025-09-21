@@ -138,29 +138,17 @@ void update_all_stats(const Position& pos,
 
 Search::Worker::Worker(SharedState&                    sharedState,
                        std::unique_ptr<ISearchManager> sm,
-                       size_t                          threadId,
-                       NumaReplicatedAccessToken       token) :
+                       size_t                          threadId) :
     // Unpack the SharedState struct into member variables
     threadIdx(threadId),
-    numaAccessToken(token),
     manager(std::move(sm)),
     options(sharedState.options),
     threads(sharedState.threads),
-    tt(sharedState.tt),
-    networks(sharedState.networks),
-    refreshTable(networks[token]) {
+    tt(sharedState.tt) {
     clear();
 }
 
-void Search::Worker::ensure_network_replicated() {
-    // Access once to force lazy initialization.
-    // We do this because we want to avoid initialization during search.
-    (void) (networks[numaAccessToken]);
-}
-
 void Search::Worker::start_searching() {
-
-    accumulatorStack.reset();
 
     // Non-main threads go directly to iterative_deepening()
     if (!is_mainthread())
@@ -246,7 +234,6 @@ void Search::Worker::iterative_deepening() {
 
     Value  alpha, beta;
     Value  bestValue     = -VALUE_INFINITE;
-    Color  us            = rootPos.side_to_move();
     double timeReduction = 1, totBestMoveChanges = 0;
     int    delta, iterIdx                        = 0;
 
@@ -329,10 +316,6 @@ void Search::Worker::iterative_deepening() {
             Value avg = rootMoves[pvIdx].averageScore;
             alpha     = std::max(avg - delta, -VALUE_INFINITE);
             beta      = std::min(avg + delta, VALUE_INFINITE);
-
-            // Adjust optimism based on root move's averageScore
-            optimism[us]  = 137 * avg / (std::abs(avg) + 91);
-            optimism[~us] = -optimism[us];
 
             // Start with a small aspiration window and, in the case of a fail
             // high/low, re-search with a bigger window until we don't fail
@@ -526,7 +509,6 @@ void Search::Worker::do_move(
     bool       capture = pos.capture_stage(move);
     DirtyPiece dp      = pos.do_move(move, st, givesCheck, &tt);
     nodes.fetch_add(1, std::memory_order_relaxed);
-    accumulatorStack.push(dp);
     if (ss != nullptr)
     {
         ss->currentMove         = move;
@@ -539,7 +521,6 @@ void Search::Worker::do_null_move(Position& pos, StateInfo& st) { pos.do_null_mo
 
 void Search::Worker::undo_move(Position& pos, const Move move) {
     pos.undo_move(move);
-    accumulatorStack.pop();
 }
 
 void Search::Worker::undo_null_move(Position& pos) { pos.undo_null_move(); }
@@ -568,8 +549,6 @@ void Search::Worker::clear() {
 
     for (size_t i = 1; i < reductions.size(); ++i)
         reductions[i] = int(2809 / 128.0 * std::log(i));
-
-    refreshTable.clear(networks[numaAccessToken]);
 }
 
 
@@ -1728,10 +1707,7 @@ TimePoint Search::Worker::elapsed() const {
 
 TimePoint Search::Worker::elapsed_time() const { return main_manager()->tm.elapsed_time(); }
 
-Value Search::Worker::evaluate(const Position& pos) {
-    return Eval::evaluate(networks[numaAccessToken], pos, accumulatorStack, refreshTable,
-                          optimism[pos.side_to_move()]);
-}
+Value Search::Worker::evaluate(const Position& pos) { return Eval::evaluate(pos); }
 
 namespace {
 // Adjusts a mate or TB score from "plies to mate from the root" to

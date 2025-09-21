@@ -378,6 +378,8 @@ void Position::set_state() const {
     for (Piece pc : Pieces)
         for (int cnt = 0; cnt < pieceCount[pc]; ++cnt)
             st->materialKey ^= Zobrist::psq[pc][8 + cnt];
+
+    update_mobility_counts();
 }
 
 
@@ -501,6 +503,38 @@ bool Position::attackers_to_exist(Square s, Bitboard occupied, Color c) const {
         || (((attacks_bb<PAWN>(s, ~c) & pieces(PAWN)) | (attacks_bb<KNIGHT>(s) & pieces(KNIGHT))
              | (attacks_bb<KING>(s) & pieces(KING)))
             & pieces(c));
+}
+
+int Position::compute_mobility(Color c) const {
+
+    if (sideToMove == c)
+        return MoveList<LEGAL>(*this).size();
+
+    Position  copy;
+    StateInfo stateCopy;
+
+    std::memcpy(&copy, this, sizeof(Position));
+    std::memcpy(&stateCopy, st, sizeof(StateInfo));
+
+    copy.st                 = &stateCopy;
+    stateCopy.previous       = nullptr;
+    stateCopy.repetition     = 0;
+    copy.sideToMove          = c;
+    stateCopy.key           ^= Zobrist::side;
+
+    copy.update_slider_blockers(WHITE);
+    copy.update_slider_blockers(BLACK);
+
+    stateCopy.checkersBB = copy.attackers_to(copy.square<KING>(c)) & copy.pieces(~c);
+    copy.set_check_info();
+
+    return MoveList<LEGAL>(copy).size();
+}
+
+void Position::update_mobility_counts() const {
+
+    st->mobilityCount[WHITE] = compute_mobility(WHITE);
+    st->mobilityCount[BLACK] = compute_mobility(BLACK);
 }
 
 // Tests whether a pseudo-legal move is legal
@@ -945,6 +979,8 @@ DirtyPiece Position::do_move(Move                      m,
         }
     }
 
+    update_mobility_counts();
+
     assert(pos_is_ok());
 
     assert(dp.pc != NO_PIECE);
@@ -1075,6 +1111,8 @@ void Position::do_null_move(StateInfo& newSt, const TranspositionTable& tt) {
     sideToMove = ~sideToMove;
 
     set_check_info();
+
+    update_mobility_counts();
 
     st->repetition = 0;
 

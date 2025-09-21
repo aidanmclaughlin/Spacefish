@@ -33,8 +33,6 @@
 
 #include "history.h"
 #include "misc.h"
-#include "nnue/network.h"
-#include "nnue/nnue_accumulator.h"
 #include "numa.h"
 #include "position.h"
 #include "score.h"
@@ -134,19 +132,16 @@ struct LimitsType {
 // The UCI stores the uci options, thread pool, and transposition table.
 // This struct is used to easily forward data to the Search::Worker class.
 struct SharedState {
-    SharedState(const OptionsMap&                               optionsMap,
-                ThreadPool&                                     threadPool,
-                TranspositionTable&                             transpositionTable,
-                const LazyNumaReplicated<Eval::NNUE::Networks>& nets) :
+    SharedState(const OptionsMap&       optionsMap,
+                ThreadPool&             threadPool,
+                TranspositionTable&     transpositionTable) :
         options(optionsMap),
         threads(threadPool),
-        tt(transpositionTable),
-        networks(nets) {}
+        tt(transpositionTable) {}
 
     const OptionsMap&                               options;
     ThreadPool&                                     threads;
     TranspositionTable&                             tt;
-    const LazyNumaReplicated<Eval::NNUE::Networks>& networks;
 };
 
 class Worker;
@@ -265,7 +260,7 @@ class NullSearchManager: public ISearchManager {
 // of the search history, and storing data required for the search.
 class Worker {
    public:
-    Worker(SharedState&, std::unique_ptr<ISearchManager>, size_t, NumaReplicatedAccessToken);
+    Worker(SharedState&, std::unique_ptr<ISearchManager>, size_t);
 
     // Called at instantiation to initialize reductions tables.
     // Reset histories, usually before a new game.
@@ -276,8 +271,6 @@ class Worker {
     void start_searching();
 
     bool is_mainthread() const { return threadIdx == 0; }
-
-    void ensure_network_replicated();
 
     // Public because they need to be updatable by the stats
     ButterflyHistory mainHistory;
@@ -331,16 +324,13 @@ class Worker {
     std::atomic<uint64_t> nodes, tbHits, bestMoveChanges;
     int                   selDepth, nmpMinPly;
 
-    Value optimism[COLOR_NB];
-
     Position  rootPos;
     StateInfo rootState;
     RootMoves rootMoves;
     Depth     rootDepth, completedDepth;
     Value     rootDelta;
 
-    size_t                    threadIdx;
-    NumaReplicatedAccessToken numaAccessToken;
+    size_t threadIdx;
 
     // Reductions lookup table initialized at startup
     std::array<int, MAX_MOVES> reductions;  // [depth or moveNumber]
@@ -350,14 +340,9 @@ class Worker {
 
     Tablebases::Config tbConfig;
 
-    const OptionsMap&                               options;
-    ThreadPool&                                     threads;
-    TranspositionTable&                             tt;
-    const LazyNumaReplicated<Eval::NNUE::Networks>& networks;
-
-    // Used by NNUE
-    Eval::NNUE::AccumulatorStack  accumulatorStack;
-    Eval::NNUE::AccumulatorCaches refreshTable;
+    const OptionsMap&       options;
+    ThreadPool&             threads;
+    TranspositionTable&     tt;
 
     friend class Stockfish::ThreadPool;
     friend class SearchManager;

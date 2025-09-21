@@ -19,104 +19,86 @@
 #include "evaluate.h"
 
 #include <algorithm>
-#include <cassert>
-#include <cmath>
-#include <cstdlib>
 #include <iomanip>
-#include <iostream>
-#include <memory>
 #include <sstream>
-#include <tuple>
 
-#include "nnue/network.h"
-#include "nnue/nnue_misc.h"
 #include "position.h"
-#include "types.h"
 #include "uci.h"
-#include "nnue/nnue_accumulator.h"
 
 namespace Stockfish {
 
-// Returns a static, purely materialistic evaluation of the position from
-// the point of view of the side to move. It can be divided by PawnValue to get
-// an approximation of the material advantage on the board in terms of pawns.
-int Eval::simple_eval(const Position& pos) {
-    Color c = pos.side_to_move();
-    return PawnValue * (pos.count<PAWN>(c) - pos.count<PAWN>(~c))
-         + (pos.non_pawn_material(c) - pos.non_pawn_material(~c));
+namespace {
+
+struct MobilityMetrics {
+    int  myMobility;
+    int  oppMobility;
+    bool myInCheck;
+    bool oppInCheck;
+};
+
+constexpr int   MobilityWeight     = 32;
+constexpr int   MobilityNormalizer = 64;
+constexpr Value MobilityMateScore  = VALUE_MATE_IN_MAX_PLY - 1;
+constexpr Value MobilityMatedScore = VALUE_MATED_IN_MAX_PLY + 1;
+
+MobilityMetrics mobility_metrics(const Position& pos) {
+    const Color us = pos.side_to_move();
+
+    MobilityMetrics metrics{};
+    metrics.myMobility  = pos.mobility(us);
+    metrics.oppMobility = pos.mobility(~us);
+    metrics.myInCheck   = pos.checkers();
+    metrics.oppInCheck  =
+      pos.attackers_to(pos.square<KING>(~us)) & pos.pieces(us) ? true : false;
+
+    return metrics;
 }
 
-bool Eval::use_smallnet(const Position& pos) { return std::abs(simple_eval(pos)) > 962; }
+Value mobility_score(const MobilityMetrics& metrics) {
+    if (metrics.myMobility == 0)
+        return metrics.myInCheck ? MobilityMatedScore : VALUE_DRAW;
 
-// Evaluate is the evaluator for the outer world. It returns a static evaluation
-// of the position from the point of view of the side to move.
-Value Eval::evaluate(const Eval::NNUE::Networks&    networks,
-                     const Position&                pos,
-                     Eval::NNUE::AccumulatorStack&  accumulators,
-                     Eval::NNUE::AccumulatorCaches& caches,
-                     int                            optimism) {
+    if (metrics.oppMobility == 0)
+        return metrics.oppInCheck ? MobilityMateScore : VALUE_DRAW;
 
-    assert(!pos.checkers());
+    const int diff  = metrics.myMobility - metrics.oppMobility;
+    const int total = metrics.myMobility + metrics.oppMobility + MobilityNormalizer;
 
-    bool smallNet           = use_smallnet(pos);
-    auto [psqt, positional] = smallNet ? networks.small.evaluate(pos, accumulators, &caches.small)
-                                       : networks.big.evaluate(pos, accumulators, &caches.big);
+    const long long scaled = static_cast<long long>(diff) * MobilityWeight * MobilityNormalizer;
+    Value           score  = static_cast<Value>(scaled / total);
 
-    Value nnue = (125 * psqt + 131 * positional) / 128;
-
-    // Re-evaluate the position when higher eval accuracy is worth the time spent
-    if (smallNet && (std::abs(nnue) < 236))
-    {
-        std::tie(psqt, positional) = networks.big.evaluate(pos, accumulators, &caches.big);
-        nnue                       = (125 * psqt + 131 * positional) / 128;
-        smallNet                   = false;
-    }
-
-    // Blend optimism and eval with nnue complexity
-    int nnueComplexity = std::abs(psqt - positional);
-    optimism += optimism * nnueComplexity / 468;
-    nnue -= nnue * nnueComplexity / 18000;
-
-    int material = 535 * pos.count<PAWN>() + pos.non_pawn_material();
-    int v        = (nnue * (77777 + material) + optimism * (7777 + material)) / 77777;
-
-    // Damp down the evaluation linearly when shuffling
-    v -= v * pos.rule50_count() / 212;
-
-    // Guarantee evaluation does not hit the tablebase range
-    v = std::clamp(v, VALUE_TB_LOSS_IN_MAX_PLY + 1, VALUE_TB_WIN_IN_MAX_PLY - 1);
-
-    return v;
+    return std::clamp(score, VALUE_TB_LOSS_IN_MAX_PLY + 1, VALUE_TB_WIN_IN_MAX_PLY - 1);
 }
 
-// Like evaluate(), but instead of returning a value, it returns
-// a string (suitable for outputting to stdout) that contains the detailed
-// descriptions and values of each evaluation term. Useful for debugging.
-// Trace scores are from white's point of view
-std::string Eval::trace(Position& pos, const Eval::NNUE::Networks& networks) {
+}  // namespace
 
-    if (pos.checkers())
-        return "Final evaluation: none (in check)";
+Value Eval::evaluate(const Position& pos) {
+    const MobilityMetrics metrics = mobility_metrics(pos);
+    return mobility_score(metrics);
+}
 
-    Eval::NNUE::AccumulatorStack accumulators;
-    auto                         caches = std::make_unique<Eval::NNUE::AccumulatorCaches>(networks);
+std::string Eval::trace(Position& pos) {
+    const MobilityMetrics metrics = mobility_metrics(pos);
+    const Value           score   = mobility_score(metrics);
 
-    std::stringstream ss;
-    ss << std::showpoint << std::noshowpos << std::fixed << std::setprecision(2);
-    ss << '\n' << NNUE::trace(pos, networks, *caches) << '\n';
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(2);
 
-    ss << std::showpoint << std::showpos << std::fixed << std::setprecision(2) << std::setw(15);
+    const Color stm = pos.side_to_move();
+    const auto   scoreCp = 0.01 * UCIEngine::to_cp(stm == WHITE ? score : -score, pos);
 
-    auto [psqt, positional] = networks.big.evaluate(pos, accumulators, &caches->big);
-    Value v                 = psqt + positional;
-    v                       = pos.side_to_move() == WHITE ? v : -v;
-    ss << "NNUE evaluation        " << 0.01 * UCIEngine::to_cp(v, pos) << " (white side)\n";
-
-    v = evaluate(networks, pos, accumulators, *caches, VALUE_ZERO);
-    v = pos.side_to_move() == WHITE ? v : -v;
-    ss << "Final evaluation       " << 0.01 * UCIEngine::to_cp(v, pos) << " (white side)";
-    ss << " [with scaled NNUE, ...]";
+    ss << "Mobility summary (STM: " << (stm == WHITE ? 'w' : 'b') << ")\n";
+    ss << "  My legal moves: " << metrics.myMobility;
+    if (metrics.myInCheck)
+        ss << " (in check)";
     ss << "\n";
+
+    ss << "  Opp legal moves: " << metrics.oppMobility;
+    if (metrics.oppInCheck)
+        ss << " (in check)";
+    ss << "\n";
+
+    ss << "  Score: " << scoreCp << " pawns";
 
     return ss.str();
 }

@@ -58,6 +58,7 @@ struct StateInfo {
     Bitboard   checkSquares[PIECE_TYPE_NB];
     Piece      capturedPiece;
     int        repetition;
+    int        mobilityCount[COLOR_NB];
 };
 
 
@@ -129,6 +130,7 @@ class Position {
     bool  gives_check(Move m) const;
     Piece moved_piece(Move m) const;
     Piece captured_piece() const;
+    int   mobility(Color c) const;
 
     // Doing and undoing moves
     void       do_move(Move m, StateInfo& newSt, const TranspositionTable* tt);
@@ -169,6 +171,9 @@ class Position {
     void remove_piece(Square s);
 
    private:
+    int  compute_mobility(Color c) const;
+    void update_mobility_counts() const;
+
     // Initialization helpers (used while setting up a position)
     void set_castling_right(Color c, Square rfrom);
     void set_state() const;
@@ -322,6 +327,7 @@ inline bool Position::capture_stage(Move m) const {
 }
 
 inline Piece Position::captured_piece() const { return st->capturedPiece; }
+inline int   Position::mobility(Color c) const { return st->mobilityCount[c]; }
 
 inline void Position::put_piece(Piece pc, Square s) {
 

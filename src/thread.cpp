@@ -52,9 +52,9 @@ Thread::Thread(Search::SharedState&                    sharedState,
         // Use the binder to [maybe] bind the threads to a NUMA node before doing
         // the Worker allocation. Ideally we would also allocate the SearchManager
         // here, but that's minor.
-        this->numaAccessToken = binder();
+        [[maybe_unused]] const auto token = binder();
         this->worker =
-          std::make_unique<Search::Worker>(sharedState, std::move(sm), n, this->numaAccessToken);
+          std::make_unique<Search::Worker>(sharedState, std::move(sm), n);
     });
 
     wait_for_search_finished();
@@ -101,8 +101,6 @@ void Thread::run_custom_job(std::function<void()> f) {
     }
     cv.notify_one();
 }
-
-void Thread::ensure_network_replicated() { worker->ensure_network_replicated(); }
 
 // Thread gets parked here, blocked on the condition variable
 // when the thread has no work to do.
@@ -400,11 +398,6 @@ std::vector<size_t> ThreadPool::get_bound_thread_count_by_numa_node() const {
     }
 
     return counts;
-}
-
-void ThreadPool::ensure_network_replicated() {
-    for (auto&& th : threads)
-        th->ensure_network_replicated();
 }
 
 }  // namespace Stockfish
